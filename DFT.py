@@ -183,12 +183,23 @@ class DFT(nn.Module):
 
 
 if __name__ == "__main__":
-    x_sample = torch.randn((200, 8, 221))
+    # x_sample = torch.randn((200, 221, 8))
+    # conv = nn.Conv1d(221, 221, groups=221, kernel_size=5, stride=5)
+    # x_conv = conv.forward(x_sample)
+    # print(x_conv.shape) #torch.Size([200, 221, 1])
 
-    print("input.shape", x_sample.shape)
+    # d = torch.randn((256, 8, 21))
+    # gate = Filter(21, 158, 8)
+    # out = gate.forward(d)
+    # print(out.shape)    #torch.Size([256, 1, 158])
+
+    input = torch.randn((1000, 8, 500))  
+    v_first = input 
+    # Batch Size/sample number样本数量, Feature Dimensions特征维度， Time Steps时间步数,
+    print(input.shape)
     model = DFT()
-    y = model.forward(x_sample)
-    print("output.shape", y.shape)
+    y = model.forward(input)
+    print(y.shape)
 
     # 计算模型参数量
     total_params = sum(p.numel() for p in model.parameters())

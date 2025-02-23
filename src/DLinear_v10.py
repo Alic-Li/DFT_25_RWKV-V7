@@ -176,7 +176,7 @@ class DLinear(nn.Module):
 
 
 if __name__ == "__main__":
-    x_sample = torch.randn((256, 8, 221))
+    x_sample = torch.randn((221, 8, 256))
     s_d = series_decomp(kernel_size=5)
     y, _ = s_d.forward(x_sample)
     print(y.shape)
@@ -184,7 +184,7 @@ if __name__ == "__main__":
 
     model = DLinear(seq_len=8, pred_len=8, enc_in=221, kernel_size=5, individual=False)
     DLinear_Init(model)
-    y = model.forward(x_sample)
+    y = model.forward(x_sample)[0]
     print(y.shape)
     print(model.Linear_Seasonal.weight)
     print(model.Linear_Trend.weight)
