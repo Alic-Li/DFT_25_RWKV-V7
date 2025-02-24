@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from DFT import DFT
 from my_lr_scheduler import ChainedScheduler
 import random
-os.environ['CUDA_VISIBLE_DEVICES'] = "6"  # 程序可见的GPU
+os.environ['CUDA_VISIBLE_DEVICES'] = "0"  # 程序可见的GPU
 cpu_num = 1
 os.environ['OMP_NUM_THREADS'] = str(cpu_num)
 os.environ['OPENBLAS_NUM_THREADS'] = str(cpu_num)
@@ -368,7 +368,7 @@ def parse_args():
                         help="dataset type")
     parser.add_argument("--country", type=str, default="CN_DATA",
                         help="dataset type")
-    parser.add_argument("--cuda", type=str, default="7",
+    parser.add_argument("--cuda", type=str, default="0",
                         help="dataset type")
     parser.add_argument("--seed", type=int, default=1200,
                         help="dataset type")

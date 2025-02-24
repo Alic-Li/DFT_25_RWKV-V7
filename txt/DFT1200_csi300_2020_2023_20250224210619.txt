@@ -1,0 +1,1 @@
+model_name=DFT1200_csi300_2020_2023  universe=csi300 seed=1200

@@ -440,8 +440,7 @@ class Block(nn.Module):
             self.mlp = RWKV_ChannelMix(layer_id, n_embd, n_ffn, hidden_sz, n_attn, n_head, ctx_len)
 
     def forward(self, x):
-        v_first = x
-        x = x + self.attn(self.ln1(x), v_first)[0]
+        x = x + self.attn(self.ln1(x))
         x = x + self.mlp(self.ln2(x))
 
         return x
@@ -457,7 +456,7 @@ if USE_CUDA_KERNEL:
 
     from torch.utils.cpp_extension import load
     HEAD_SIZE = 64
-    DTYPE = torch.half
+    DTYPE = torch.float32
     load(name="wkv7", sources=["cuda/wkv7_op.cpp", f"cuda/wkv7.cu"], is_python_module=False,
                         verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"])
     class WKV_7(torch.autograd.Function):
@@ -489,7 +488,7 @@ if USE_CUDA_KERNEL:
 
 else:
     def RWKV7_OP(r, w, k, v, a, b):
-        DTYPE = torch.half
+        DTYPE = torch.float32
         HEAD_SIZE = 64
         B, T, C = r.size()
         H = C // HEAD_SIZE
@@ -581,7 +580,7 @@ class RWKV_Tmix_x070(MyModule):
         self.ln_x = nn.GroupNorm(H, C, eps=64e-5) # !!! notice eps value !!!
 
     @MyFunction
-    def forward(self, x, v_first):
+    def forward(self, x):
         B, T, C = x.size()
         H = self.n_head
         xx = self.time_shift(x) - x
@@ -597,10 +596,6 @@ class RWKV_Tmix_x070(MyModule):
         w = -F.softplus(-(self.w0 + torch.tanh(xw @ self.w1) @ self.w2)) - 0.5 # soft-clamp to (-inf, -0.5)
         k = self.key(xk)
         v = self.value(xv)
-        if self.layer_id == 0:
-            v_first = v # store the v of the first layer
-        else:
-            v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2) # add value residual
         a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2) # a is "in-context learning rate"
         g = torch.sigmoid(xg @ self.g1) @ self.g2
 
@@ -613,7 +608,7 @@ class RWKV_Tmix_x070(MyModule):
         
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.output(x * g)
-        return x, v_first
+        return x
     
 ########################################################################################################
 # RWKV ChannelMix
@@ -643,7 +638,7 @@ class RWKV_CMix_x070(MyModule):
         return self.value(k)
 
 if __name__ == "__main__":
-    v_first = torch.randn((16, 8, 256)) 
+    # v_first = torch.randn((16, 8, 256)) 
     x = torch.randn((16, 8, 256))
     rwkv = Block(256, 256, 4, 300, 256, 256)
     y = rwkv.forward(x)
