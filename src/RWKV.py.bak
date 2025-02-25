@@ -7,7 +7,6 @@ import logging
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.utils.cpp_extension import load
 
 
 
@@ -15,7 +14,7 @@ D_DECAY_LORA = 64
 D_AAA_LORA = 64
 D_MV_LORA = 32
 D_GATE_LORA = 128
-HEAD_SIZE = 64
+# HEAD_SIZE = 64
 MyModule = torch.jit.ScriptModule
 MyFunction = torch.jit.script_method
 MyStatic = torch.jit.script
@@ -423,10 +422,10 @@ class Block(nn.Module):
         if model_type == 'RWKV':
             # self.ln1 = FixedNorm(.n_embd)
             # self.ln2 = FixedNorm(.n_embd)
-            self.attn = RWKV_TimeMix(layer_id, n_embd, n_attn, n_head, ctx_len)
-            # self.attn = RWKV_Tmix_x070(layer_id, n_embd, n_attn, n_head, ctx_len)
-            self.mlp = RWKV_ChannelMix(layer_id, n_embd, n_ffn, hidden_sz, n_attn, n_head, ctx_len)
-            # self.mlp = RWKV_CMix_x070(layer_id, n_embd, n_ffn, hidden_sz, n_attn, n_head, ctx_len)
+            # self.attn = RWKV_TimeMix(layer_id, n_embd, n_attn, n_head, ctx_len)
+            self.attn = RWKV_Tmix_x070(layer_id, n_embd, n_attn, n_head, ctx_len)
+            # self.mlp = RWKV_ChannelMix(layer_id, n_embd, n_ffn, hidden_sz, n_attn, n_head, ctx_len)
+            self.mlp = RWKV_CMix_x070(layer_id, n_embd, n_ffn, hidden_sz, n_attn, n_head, ctx_len)
 
         elif model_type == 'MHA_rotary':
             self.attn = MHA_rotary(n_embd, n_attn, n_head, ctx_len, layer_id)
@@ -452,35 +451,78 @@ class Block(nn.Module):
 ########################################################################################################
 # CUDA Kernel
 ########################################################################################################
-CHUNK_LEN = 16
 
-flags = [f'-D_C_={HEAD_SIZE}',  f"-D_CHUNK_LEN_={CHUNK_LEN}", '-xhip', '-fopenmp', '-ffast-math', '--offload-arch=gfx1030','-munsafe-fp-atomics',]
-load(name="wind_backstepping", sources=[f'/home/alic-li/DFT_25_RWKV-V7/src/cuda/wkv7_op.cpp', '/home/alic-li/DFT_25_RWKV-V7/src/cuda/wkv7.cu'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
-class WindBackstepping(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, w,q,k,v,z,b):
-        B,T,H,C = w.shape 
-        assert T%CHUNK_LEN == 0
-        assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,z,b])
-        assert all(i.is_contiguous() for i in [w,q,k,v,z,b])
-        y = torch.empty_like(v)
-        s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
-        sa = torch.empty(B,T,H,C, dtype=torch.float32,device=w.device)
-        torch.ops.wind_backstepping.forward(w,q,k,v,z,b, y,s,sa)
-        ctx.save_for_backward(w,q,k,v,z,b,s,sa)
-        return y
-    @staticmethod
-    def backward(ctx, dy):
-        assert all(i.dtype==torch.bfloat16 for i in [dy])
-        assert all(i.is_contiguous() for i in [dy])
-        w,q,k,v,z,b,s,sa = ctx.saved_tensors
-        dw,dq,dk,dv,dz,db = [torch.empty_like(x) for x in [w,q,k,v,z,b]]
-        torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
-        return dw,dq,dk,dv,dz,db
-def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
-    B,T,HC = q.shape
-    q,w,k,v,a,b = [i.view(B,T,HC//64,64) for i in [q,w,k,v,a,b]]
-    return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)
+if USE_CUDA_KERNEL:
+
+    from torch.utils.cpp_extension import load
+    HEAD_SIZE = 64
+    DTYPE = torch.float32
+    load(name="wkv7", sources=["cuda/wkv7_op.cpp", f"cuda/wkv7.cu"], is_python_module=False,
+                        verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"])
+    class WKV_7(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, r, w, k, v, a, b):
+            with torch.no_grad():
+                B, T, C = r.size()
+                H = C // HEAD_SIZE
+                N = HEAD_SIZE
+                assert HEAD_SIZE == C // H
+                assert r.dtype == DTYPE
+                assert w.dtype == DTYPE
+                assert k.dtype == DTYPE
+                assert v.dtype == DTYPE
+                assert a.dtype == DTYPE
+                assert b.dtype == DTYPE
+                assert r.is_contiguous()
+                assert w.is_contiguous()
+                assert k.is_contiguous()
+                assert v.is_contiguous()
+                assert a.is_contiguous()
+                assert b.is_contiguous()
+                y = torch.empty((B, T, C), device=k.device, dtype=DTYPE, memory_format=torch.contiguous_format)
+                torch.ops.wkv7.forward(B, T, C, H, r, w, k, v, a, b, y)
+                return y
+
+    def RWKV7_OP(r, w, k, v, a, b):
+        return WKV_7.apply(r, w, k, v, a, b)
+
+else:
+    def RWKV7_OP(r, w, k, v, a, b):
+        DTYPE = torch.float32
+        HEAD_SIZE = 64
+        B, T, C = r.size()
+        H = C // HEAD_SIZE
+        N = HEAD_SIZE
+        r = r.view(B, T, H, N).float()
+        k = k.view(B, T, H, N).float()
+        v = v.view(B, T, H, N).float()
+        a = a.view(B, T, H, N).float()
+        b = b.view(B, T, H, N).float()
+        w = torch.exp(-torch.exp(w.view(B, T, H, N).float()))
+        out = torch.zeros((B, T, H, N), device=r.device, dtype=torch.float)
+        state = torch.zeros((B, H, N, N), device=r.device, dtype=torch.float)
+
+        for t in range(T):
+            kk = k[:, t, :].view(B, H, 1, N)
+            rr = r[:, t, :].view(B, H, N, 1)
+            vv = v[:, t, :].view(B, H, N, 1)
+            aa = a[:, t, :].view(B, H, N, 1)
+            bb = b[:, t, :].view(B, H, 1, N)
+            state = state * w[: , t, :, None, :] + state @ aa @ bb + vv @ kk
+            out[:, t, :] = (state @ rr).view(B, H, N)
+
+            # another method using einsum
+            #
+            # kk = k[:, t, :]
+            # rr = r[:, t, :]
+            # vv = v[:, t, :]
+            # aa = a[:, t, :]
+            # bb = b[:, t, :]
+            # sab = torch.einsum('bhik,bhk,bhj->bhij', state, aa, bb)
+            # state = state * w[: , t, :, None, :] + sab + torch.einsum('bhj,bhi->bhij', kk, vv)
+            # out[:, t, :] = torch.einsum('bhj,bhij->bhi', rr, state)
+
+        return out.view(B, T, C).to(dtype=DTYPE)
 
 ########################################################################################################
 # RWKV TimeMix
@@ -490,87 +532,55 @@ class RWKV_Tmix_x070(MyModule):
     def __init__(self, layer_id, n_embd, n_attn, n_head, ctx_len):
         super().__init__()
         self.layer_id = layer_id
-        self.head_size = 64
-        self.n_head = n_attn // self.head_size
-        assert n_attn % n_head == 0
+        self.n_embd = n_embd
+        self.n_attn = n_attn
+        self.n_head = n_head
+        self.ctx_len = ctx_len
+
+        
+        self.head_size = n_attn // n_head
+        self.n_head = self.n_attn // self.head_size
+        assert self.n_attn % self.n_head == 0
+
         H = self.n_head
         N = self.head_size
-        C = n_embd
+        C = self.n_embd
 
-        with torch.no_grad():
-            ratio_0_to_1 = layer_id / (1  - 1)  # 0 to 1
-            ratio_1_to_almost0 = 1.0 - (layer_id / 1)  # 1 to ~0
-            ddd = torch.ones(1, 1, C)
-            for i in range(C):
-                ddd[0, 0, i] = i / C
+        self.x_r = nn.Parameter(torch.empty(1,1,C))
+        self.x_w = nn.Parameter(torch.empty(1,1,C))
+        self.x_k = nn.Parameter(torch.empty(1,1,C))
+        self.x_v = nn.Parameter(torch.empty(1,1,C))
+        self.x_a = nn.Parameter(torch.empty(1,1,C))
+        self.x_g = nn.Parameter(torch.empty(1,1,C))
 
-            self.x_r = nn.Parameter(1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0))
-            self.x_w = nn.Parameter(1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0))
-            self.x_k = nn.Parameter(1.0 - (torch.pow(ddd, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1))
-            self.x_v = nn.Parameter(1.0 - (torch.pow(ddd, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1))
-            self.x_a = nn.Parameter(1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0))
-            self.x_g = nn.Parameter(1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0))
+        self.w0 = nn.Parameter(torch.empty(1,1,C))
+        self.w1 = nn.Parameter(torch.empty(C, D_DECAY_LORA))
+        self.w2 = nn.Parameter(torch.empty(D_DECAY_LORA, C))
 
-            def ortho_init(x, scale):
-                with torch.no_grad():
-                    shape = x.shape
-                    if len(shape) == 2:
-                        gain = math.sqrt(shape[0] / shape[1]) if shape[0] > shape[1] else 1
-                        nn.init.orthogonal_(x, gain=gain * scale)
-                    elif len(shape) == 3:
-                        gain = math.sqrt(shape[1] / shape[2]) if shape[1] > shape[2] else 1
-                        for i in range(shape[0]):
-                            nn.init.orthogonal_(x[i], gain=gain * scale)
-                    else:
-                        assert False
-                    return x
+        self.a0 = nn.Parameter(torch.empty(1,1,C))
+        self.a1 = nn.Parameter(torch.empty(C, D_AAA_LORA))
+        self.a2 = nn.Parameter(torch.empty(D_AAA_LORA, C))
 
-            # D_DECAY_LORA = 64
-            D_DECAY_LORA = max(32, int(round(  (1.8*(C**0.5))  /32)*32)) # suggestion
-            self.w1 = nn.Parameter(torch.zeros(C, D_DECAY_LORA))
-            self.w2 = nn.Parameter(ortho_init(torch.zeros(D_DECAY_LORA, C), 0.1))
-            decay_speed = torch.ones(C)
-            for n in range(C):
-                decay_speed[n] = -7 + 5 * (n / (C - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
-            self.w0 = nn.Parameter(decay_speed.reshape(1,1,C) + 0.5) # !!! 0.5 comes from F.softplus !!!
+        self.v0 = nn.Parameter(torch.empty(1,1,C))
+        self.v1 = nn.Parameter(torch.empty(C, D_MV_LORA))
+        self.v2 = nn.Parameter(torch.empty(D_MV_LORA, C))
 
-            # D_AAA_LORA = 64
-            D_AAA_LORA = max(32, int(round(  (1.8*(C**0.5))  /32)*32)) # suggestion
-            self.a1 = nn.Parameter(torch.zeros(C, D_AAA_LORA))
-            self.a2 = nn.Parameter(ortho_init(torch.zeros(D_AAA_LORA, C), 0.1))
-            self.a0 = nn.Parameter(torch.zeros(1,1,C))
+        self.g1 = nn.Parameter(torch.empty(C, D_GATE_LORA))
+        self.g2 = nn.Parameter(torch.empty(D_GATE_LORA, C))
 
-            # D_MV_LORA = 32
-            D_MV_LORA = max(32, int(round(  (1.3*(C**0.5))  /32)*32)) # suggestion
-            self.v1 = nn.Parameter(torch.zeros(C, D_MV_LORA))
-            self.v2 = nn.Parameter(ortho_init(torch.zeros(D_MV_LORA, C), 0.1))
-            self.v0 = nn.Parameter(torch.zeros(1,1,C)+1.0)
+        self.k_k = nn.Parameter(torch.empty(1,1,C))
+        self.k_a = nn.Parameter(torch.empty(1,1,C))
+        self.r_k = nn.Parameter(torch.empty(H,N))
 
-            # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
-            # D_GATE_LORA = 128
-            D_GATE_LORA = max(32, int(round(  (0.6*(C**0.8))  /32)*32)) # suggestion
-            self.g1 = nn.Parameter(torch.zeros(C, D_GATE_LORA))
-            self.g2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, C), 0.1))
-
-            self.k_k = nn.Parameter(torch.ones(1,1,C)*0.85)
-            self.k_a = nn.Parameter(torch.ones(1,1,C))
-            self.r_k = nn.Parameter(torch.zeros(H,N))
-
-            self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-            self.receptance = nn.Linear(C, C, bias=False)
-            self.key = nn.Linear(C, C, bias=False)
-            self.value = nn.Linear(C, C, bias=False)
-            self.output = nn.Linear(C, C, bias=False)
-            self.ln_x = nn.GroupNorm(H, C, eps=(1e-5)*(8**2)) # !!! notice eps value !!!
-
-            # !!! initialize if you are using RWKV_Tmix_x070 in your code !!!
-            self.receptance.weight.data.uniform_(-0.5/(C**0.5), 0.5/(C**0.5))
-            self.key.weight.data.uniform_(-0.05/(C**0.5), 0.05/(C**0.5))
-            self.value.weight.data.uniform_(-0.5/(C**0.5), 0.5/(C**0.5))
-            self.output.weight.data.zero_()
+        self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
+        self.receptance = nn.Linear(C, C, bias=False)
+        self.key = nn.Linear(C, C, bias=False)
+        self.value = nn.Linear(C, C, bias=False)
+        self.output = nn.Linear(C, C, bias=False)
+        self.ln_x = nn.GroupNorm(H, C, eps=64e-5) # !!! notice eps value !!!
 
     @MyFunction
-    def forward(self, x, v_first):
+    def forward(self, x):
         B, T, C = x.size()
         H = self.n_head
         xx = self.time_shift(x) - x
@@ -586,10 +596,6 @@ class RWKV_Tmix_x070(MyModule):
         w = -F.softplus(-(self.w0 + torch.tanh(xw @ self.w1) @ self.w2)) - 0.5 # soft-clamp to (-inf, -0.5)
         k = self.key(xk)
         v = self.value(xv)
-        if self.layer_id == 0:
-            v_first = v # store the v of the first layer
-        else:
-            v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2) # add value residual
         a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2) # a is "in-context learning rate"
         g = torch.sigmoid(xg @ self.g1) @ self.g2
 
@@ -597,12 +603,12 @@ class RWKV_Tmix_x070(MyModule):
         kk = F.normalize(kk.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,C)
         k = k * (1 + (a-1) * self.k_a)
 
-        x = RUN_CUDA_RWKV7g(r, w, k, v, -kk, kk*a)
+        x = RWKV7_OP(r, w, k, v, -kk, kk*a)
         x = self.ln_x(x.view(B * T, C)).view(B, T, C)
-
+        
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.output(x * g)
-        return x, v_first
+        return x
     
 ########################################################################################################
 # RWKV ChannelMix
@@ -612,21 +618,16 @@ class RWKV_CMix_x070(MyModule):
     def __init__(self, layer_id, n_embd, n_ffn, hidden_sz, n_attn, n_head, ctx_len):
         super().__init__()
         self.layer_id = layer_id
+        self.n_embd = n_embd
+        self.n_nffn = n_ffn
+        self.hidden_sz = hidden_sz
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
         with torch.no_grad():
-            ratio_1_to_almost0 = 1.0 - (layer_id / 1)  # 1 to ~0
-            ddd = torch.ones(1, 1, n_embd)
-            for i in range(n_embd):
-                ddd[0, 0, i] = i / n_embd
-            self.x_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0**4))
+            self.x_k = nn.Parameter(torch.empty(1, 1, self.n_embd))
 
-        self.key = nn.Linear(n_embd, n_embd * 4, bias=False)
-        self.value = nn.Linear(n_embd * 4, n_embd, bias=False)
-
-        # !!! initialize if you are using RWKV_Tmix_x070 in your code !!!
-        # self.key.weight.data.uniform_(-0.5/(args.n_embd**0.5), 0.5/(args.n_embd**0.5))
-        # self.value.weight.data.zero_()
+        self.key = nn.Linear(self.n_embd, self.n_nffn, bias=False)
+        self.value = nn.Linear(self.n_nffn, self.n_embd, bias=False)
 
     @MyFunction
     def forward(self, x):
@@ -634,13 +635,12 @@ class RWKV_CMix_x070(MyModule):
         
         k = x + xx * self.x_k
         k = torch.relu(self.key(k)) ** 2
-
         return self.value(k)
 
 if __name__ == "__main__":
     # v_first = torch.randn((16, 8, 256)) 
-    x = torch.randn((4, 8, 64))
-    rwkv = Block(64, 64, 1, 300, 64, 64)
+    x = torch.randn((8, 4, 64))
+    rwkv = Block(64, 64, 1, 300, 64, 64) # n_embd, n_attn, n_head, ctx_len, n_ffn, hidden_sz  1 layer:64 embdding
     y = rwkv.forward(x)
     print(y.shape)
     print(y)
