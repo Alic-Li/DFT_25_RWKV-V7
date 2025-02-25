@@ -22,7 +22,37 @@ USE_CUDA_KERNEL = False
 
 logger = logging.getLogger(__name__)
 
-
+from fla.layers import RWKV7Attention # type: ignore
+from fla.utils import device
+class TMix(nn.Module):
+    def __init__(self, dim, block_id, n_blocks):
+        super().__init__()
+        self.rwkv7 = RWKV7Attention(
+            "chunk",
+            dim,
+            layer_idx=block_id
+        )
+    def forward(self, x, v_first):
+        x_attn, _, past_key_values, v_first = self.rwkv7(x, v_first=v_first)
+        return x_attn, v_first
+class CMix(nn.Module):
+    def __init__(self, dim, hidden_dim, block_id, n_blocks):
+        super().__init__()
+        self.value = nn.Linear(dim, dim)
+    def forward(self, x):
+        return self.value(x)
+class RWKV7Block(nn.Module):
+    def __init__(self, dim, block_id, n_blocks):
+        super().__init__()
+        self.attn = TMix(dim, block_id, n_blocks)
+        self.mlp = CMix(dim, dim * 4, block_id, n_blocks)
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+    def forward(self, x, v_first):
+        x_attn, v_first = self.attn(self.norm1(x), v_first=v_first)
+        x = x + x_attn
+        x = x + self.mlp(self.norm2(x))
+        return x, v_first
 ########################################################################################################
 # RWKV: RWKV Time-mix + RWKV Channel-mix
 ########################################################################################################
@@ -427,7 +457,6 @@ class Block(nn.Module):
             # self.attn = RWKV_Tmix_x070(layer_id, n_embd, n_attn, n_head, ctx_len)
             self.mlp = RWKV_ChannelMix(layer_id, n_embd, n_ffn, hidden_sz, n_attn, n_head, ctx_len)
             # self.mlp = RWKV_CMix_x070(layer_id, n_embd, n_ffn, hidden_sz, n_attn, n_head, ctx_len)
-
         elif model_type == 'MHA_rotary':
             self.attn = MHA_rotary(n_embd, n_attn, n_head, ctx_len, layer_id)
             self.mlp = GeGLU(layer_id, n_embd, n_ffn, time_shift=True)
@@ -646,9 +675,27 @@ class RWKV_CMix_x070(MyModule):
         return self.value(k)
 
 if __name__ == "__main__":
-    # v_first = torch.randn((16, 8, 256)) 
-    x = torch.randn((8, 4, 64))
-    rwkv = Block(64, 64, 1, 300, 64, 64) # n_embd, n_attn, n_head, ctx_len, n_ffn, hidden_sz  1 layer:64 embdding
-    y = rwkv.forward(x)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    v_first = None
+    x = torch.randn((8, 8, 256)).to(device)
+    rwkv = RWKV7Block(256, 0, 4).to(device)
+    y, v_first = rwkv(x, v_first)
     print(y.shape)
     print(y)
+# if __name__ == "__main__":
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     dim = 512  # example dimension
+#     block_id = 0
+#     n_blocks = 12
+#     v_first = None
+
+#     rwkv_block = RWKV7Block(dim, block_id, n_blocks).to(device)
+    
+#     # Dummy input tensor
+#     x = torch.randn(1, 10, dim).to(device)
+
+#     # Forward pass
+#     x, v_first = rwkv_block(x, v_first)
+#     print(x.shape)
+#     print(x)
+    
