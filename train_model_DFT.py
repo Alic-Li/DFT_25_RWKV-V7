@@ -22,6 +22,7 @@ os.environ['MKL_NUM_THREADS'] = str(cpu_num)
 os.environ['VECLIB_MAXIMUM_THREADS'] = str(cpu_num)
 os.environ['NUMEXPR_NUM_THREADS'] = str(cpu_num)
 torch.set_num_threads(cpu_num)
+torch.set_float32_matmul_precision('high')
 
 
 def set_random_seed(seed):
@@ -289,7 +290,7 @@ def train(model_name,dataset,universe,country,seed):
         train_optimizer = TrainConfig.train_optimizer
         lr_scheduler = TrainConfig.lr_scheduler
 
-        best_valid_loss = np.Inf
+        best_valid_loss = np.inf
 
         print("==" * 10 +
               f" Now is Training {TrainConfig.model_name}_{TrainConfig.seed} " + "==" * 10 + "\n")

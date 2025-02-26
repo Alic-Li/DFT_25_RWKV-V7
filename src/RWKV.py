@@ -22,8 +22,8 @@ USE_CUDA_KERNEL = False
 
 logger = logging.getLogger(__name__)
 
-from fla.layers import RWKV7Attention # type: ignore
-from fla.utils import device
+from rwkvfla.layers import RWKV7Attention # type: ignore
+from rwkvfla.utils import device
 class TMix(nn.Module):
     def __init__(self, dim, block_id, n_blocks):
         super().__init__()
@@ -48,11 +48,11 @@ class RWKV7Block(nn.Module):
         self.mlp = CMix(dim, dim * 4, block_id, n_blocks)
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
-    def forward(self, x, v_first):
-        x_attn, v_first = self.attn(self.norm1(x), v_first=v_first)
+    def forward(self, x):
+        x_attn, v_first = self.attn(self.norm1(x), v_first=None)
         x = x + x_attn
         x = x + self.mlp(self.norm2(x))
-        return x, v_first
+        return x
 ########################################################################################################
 # RWKV: RWKV Time-mix + RWKV Channel-mix
 ########################################################################################################
@@ -676,10 +676,12 @@ class RWKV_CMix_x070(MyModule):
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    v_first = None
+    torch.set_float32_matmul_precision('high')
+
+    # v_first = None
     x = torch.randn((8, 8, 256)).to(device)
     rwkv = RWKV7Block(256, 0, 4).to(device)
-    y, v_first = rwkv(x, v_first)
+    y = rwkv(x)
     print(y.shape)
     print(y)
 # if __name__ == "__main__":

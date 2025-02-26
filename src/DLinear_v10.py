@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from src.RWKV import Block, RWKV_Init
+from src.RWKV import Block, RWKV_Init, RWKV7Block
 
 
 def DLinear_Init(module, min_val=-5e-2, max_val=8e-2):
@@ -45,19 +45,18 @@ class series_decomp(nn.Module):
         self.d_model=256
         self.n_attn = 256
         self.n_head = 4
-        self.rwkv = Block(layer_id=0, n_embd=self.d_model,
-                          n_attn=self.n_attn, n_head=self.n_head, ctx_len=300,
-                          n_ffn=self.d_model, hidden_sz=self.d_model)
+        self.rwkv = RWKV7Block(dim=self.d_model, block_id=0, n_blocks=self.n_head)
         RWKV_Init(self.rwkv, vocab_size=self.d_model, n_embd=self.d_model, rwkv_emb_scale=1.0)
         self.a = nn.Parameter(torch.tensor(0.6), requires_grad=True) 
 
     def forward(self, x):
+        # v_first = None
         # print("**************x.shape ",x.shape)
         moving_mean = self.moving_avg(x)
         # print("**************moving_mean.shape ",moving_mean.shape)
         linear_x=self.rwkv(x)
         # print("**************linear_x.shape ",linear_x.shape)
-        moving_mean = moving_mean*self.a+linear_x*(1-self.a)
+        moving_mean = moving_mean*self.a+linear_x[0]*(1-self.a)
         res = x - moving_mean
         return res, moving_mean
 

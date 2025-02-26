@@ -5,7 +5,7 @@ from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.normalization import LayerNorm
 import math
 import numpy as np
-from src.RWKV import Block, RWKV_Init
+from src.RWKV import Block, RWKV_Init, RWKV7Block
 from src import DLinear_v10
  
 
@@ -140,13 +140,9 @@ class DFT(nn.Module):
         self.d_gate_input = (gate_input_end_index - gate_input_start_index)  # F'
         self.feature_gate = Filter(self.d_gate_input, self.d_feat, seq_len)
 
-        self.rwkv_trend = Block(layer_id=0, n_embd=self.d_model,
-                                n_attn=self.n_attn, n_head=self.n_head, ctx_len=300,
-                                n_ffn=self.d_model, hidden_sz=self.d_model)
+        self.rwkv_trend = RWKV7Block(dim=self.d_model, block_id=0, n_blocks=self.n_head)
         RWKV_Init(self.rwkv_trend, vocab_size=self.d_model, n_embd=self.d_model, rwkv_emb_scale=1.0)
-        self.rwkv_season = Block(layer_id=0, n_embd=self.d_model,
-                                 n_attn=self.n_attn, n_head=self.n_head, ctx_len=300,
-                                 n_ffn=self.d_model, hidden_sz=self.d_model)
+        self.rwkv_season = RWKV7Block(dim=self.d_model, block_id=0, n_blocks=self.n_head)
         RWKV_Init(self.rwkv_season, vocab_size=self.d_model, n_embd=self.d_model, rwkv_emb_scale=1.0)
 
         self.feat_to_model = nn.Linear(d_feat, d_model)  # 维度转化
@@ -192,14 +188,16 @@ if __name__ == "__main__":
     # gate = Filter(21, 158, 8)
     # out = gate.forward(d)
     # print(out.shape)    #torch.Size([256, 1, 158])
-
-    input = torch.randn((1000, 8, 500))  
-    v_first = input 
+    torch.set_float32_matmul_precision('high')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # v_first = None
+    input = torch.randn((1000, 8, 500)).to(device)  
     # Batch Size/sample number样本数量, Feature Dimensions特征维度， Time Steps时间步数,
     print(input.shape)
-    model = DFT()
+    model = DFT().to(device) 
     y = model.forward(input)
     print(y.shape)
+    print(y)
 
     # 计算模型参数量
     total_params = sum(p.numel() for p in model.parameters())
