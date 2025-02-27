@@ -3,6 +3,7 @@
 ```
 git clone https://github.com/SJTU-Quant/qlib.git
 cd qlib
+pip install rwkv-fla
 pip install .
 ```
 
